@@ -472,11 +472,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not env_root.is_absolute():
         env_root = project_root / env_root
     env_root.mkdir(parents=True, exist_ok=True)
+    requirement_args = list(args.requirements)
     requirements = [
         (Path(path) if Path(path).is_absolute() else project_root / path)
-        for path in args.requirements
+        for path in requirement_args
     ]
-    default_requirement_candidates = args.default_requirements or []
+    default_requirement_candidates = list(args.default_requirements or [])
     if not args.no_auto_requirements and not requirements:
         for candidate in default_requirement_candidates:
             candidate_path = Path(candidate)
@@ -489,7 +490,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 requirements.append(candidate_path)
     requirements = list(dict.fromkeys(requirements))
-    packages = list(dict.fromkeys(args.packages or []))
+    package_args = list(args.packages or [])
+    packages = list(dict.fromkeys(package_args))
 
     manager = EnvManager(
         tool=tool,
