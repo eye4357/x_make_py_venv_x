@@ -9,10 +9,37 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import TypeVar
+
+LOGGER = logging.getLogger(__name__)
+
+
+DEFAULT_AUTO_REQUIREMENT_FILES: tuple[str, ...] = (
+    "requirements.txt",
+    "x_0_make_all_x/requirements.txt",
+)
+
+_MAJOR_INDEX = 0
+_MINOR_INDEX = 1
+_PATCH_INDEX = 2
+
+
+HashableT = TypeVar("HashableT", bound=Hashable)
+
+
+def _dedupe_preserve_order(items: Iterable[HashableT]) -> list[HashableT]:
+    seen: set[HashableT] = set()
+    result: list[HashableT] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
 
 
 class Tool(Enum):
@@ -44,9 +71,17 @@ class VersionRequest:
         if not parts or not parts[0].isdigit():
             msg = f"Invalid version specifier: {text!r}"
             raise ValueError(msg)
-        major = int(parts[0])
-        minor = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
-        patch = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+        major = int(parts[_MAJOR_INDEX])
+        minor = (
+            int(parts[_MINOR_INDEX])
+            if len(parts) > _MINOR_INDEX and parts[_MINOR_INDEX].isdigit()
+            else 0
+        )
+        patch = (
+            int(parts[_PATCH_INDEX])
+            if len(parts) > _PATCH_INDEX and parts[_PATCH_INDEX].isdigit()
+            else None
+        )
         return cls(raw=text, major=major, minor=minor, patch=patch)
 
     @property
@@ -130,7 +165,7 @@ class EnvManager:
                 f"Checking availability of Python {version.py_launcher_tag}",
             )
         elif self.tool is Tool.CURRENT:
-            logging.info(
+            LOGGER.info(
                 "Using current interpreter at %s for Python %s",
                 sys.executable,
                 version.raw,
@@ -141,10 +176,10 @@ class EnvManager:
 
     def _ensure_environment(self, version: VersionRequest, env_path: Path) -> bool:
         if env_path.exists():
-            logging.info("Environment already exists at %s", env_path)
+            LOGGER.info("Environment already exists at %s", env_path)
             return False
         if self.dry_run:
-            logging.info("[dry-run] Would create %s", env_path)
+            LOGGER.info("[dry-run] Would create %s", env_path)
             return False
         env_path.parent.mkdir(parents=True, exist_ok=True)
         if self.tool is Tool.UV:
@@ -181,7 +216,7 @@ class EnvManager:
         else:
             msg = f"Unhandled tool: {self.tool}"
             raise RuntimeError(msg)
-        logging.info("Created environment at %s", env_path)
+        LOGGER.info("Created environment at %s", env_path)
         return True
 
     def _python_binary(self, env_path: Path) -> Path:
@@ -215,7 +250,7 @@ class EnvManager:
             raise RuntimeError(msg)
         for requirement in requirement_files:
             if not requirement.exists():
-                logging.warning("Requirement file %s missing; skipping", requirement)
+                LOGGER.warning("Requirement file %s missing; skipping", requirement)
                 continue
             self._run_command(
                 [str(python_bin), "-m", "pip", "install", "-r", str(requirement)],
@@ -239,15 +274,15 @@ class EnvManager:
         command: Sequence[str],
         reason: str,
         *,
-        env: dict[str, str] | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> None:
-        logging.info(reason)
-        logging.debug("Command: %s", " ".join(command))
+        LOGGER.info(reason)
+        LOGGER.debug("Command: %s", " ".join(command))
         if self.dry_run:
-            logging.info("[dry-run] Skipped execution")
+            LOGGER.info("[dry-run] Skipped execution")
             return
         try:
-            subprocess.run(command, check=True, env=env)
+            subprocess.run(command, check=True, env=dict(env) if env else None)  # noqa: S603
         except subprocess.CalledProcessError as exc:
             msg = f"Command failed ({reason}): {exc}"
             raise RuntimeError(msg) from exc
@@ -281,9 +316,7 @@ def _tool_available(tool: Tool) -> bool:
         return shutil.which("pyenv") is not None
     if tool is Tool.PYLAUNCHER:
         return shutil.which("py") is not None
-    if tool is Tool.CURRENT:
-        return True
-    return False
+    return tool is Tool.CURRENT
 
 
 def _ensure_tool_available(
@@ -294,11 +327,11 @@ def _ensure_tool_available(
 ) -> None:
     if tool is Tool.UV and _resolve_uv_executable() is None and bootstrap_uv:
         if dry_run:
-            logging.info("[dry-run] Would install uv via pip")
+            LOGGER.info("[dry-run] Would install uv via pip")
             return
-        logging.info("Installing uv via pip to provision interpreters")
+        LOGGER.info("Installing uv via pip to provision interpreters")
         try:
-            subprocess.run(
+            subprocess.run(  # noqa: S603
                 [sys.executable, "-m", "pip", "install", "--upgrade", "uv"],
                 check=True,
             )
@@ -320,7 +353,7 @@ def _resolve_uv_executable() -> str | None:
 def write_python_version(project_root: Path, version: VersionRequest) -> None:
     target = project_root / ".python-version"
     target.write_text(f"{version.raw}\n", encoding="utf-8")
-    logging.info("Pinned .python-version to %s", version.raw)
+    LOGGER.info("Pinned .python-version to %s", version.raw)
 
 
 def update_tox_ini(
@@ -346,7 +379,7 @@ def update_tox_ini(
     tox_path.parent.mkdir(parents=True, exist_ok=True)
     with tox_path.open("w", encoding="utf-8") as handle:
         config.write(handle)
-    logging.info("Updated %s with envlist=%s", tox_path, env_names)
+    LOGGER.info("Updated %s with envlist=%s", tox_path, env_names)
 
 
 def parse_versions(items: Iterable[str]) -> list[VersionRequest]:
@@ -393,20 +426,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--requirements",
         action="append",
-        default=[],
         help="Requirement files to install into each environment",
     )
     parser.add_argument(
         "--default-requirements",
         action="append",
-        default=["requirements.txt", "x_0_make_all_x/requirements.txt"],
         help="Candidate requirement files to auto-include when present",
     )
     parser.add_argument(
         "--package",
         dest="packages",
         action="append",
-        default=[],
         help="Additional packages to install into each environment",
     )
     parser.add_argument(
@@ -472,26 +502,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not env_root.is_absolute():
         env_root = project_root / env_root
     env_root.mkdir(parents=True, exist_ok=True)
-    requirement_args = list(args.requirements)
-    requirements = [
-        (Path(path) if Path(path).is_absolute() else project_root / path)
-        for path in requirement_args
-    ]
-    default_requirement_candidates = list(args.default_requirements or [])
+    requirement_args = [str(item) for item in (args.requirements or [])]
+    requirements: list[Path] = []
+    for raw in requirement_args:
+        candidate_path = Path(raw)
+        if not candidate_path.is_absolute():
+            candidate_path = project_root / candidate_path
+        requirements.append(candidate_path)
+
+    auto_requirement_candidates = list(DEFAULT_AUTO_REQUIREMENT_FILES)
+    if args.default_requirements:
+        auto_requirement_candidates.extend(str(item) for item in args.default_requirements)
+    auto_requirement_candidates = _dedupe_preserve_order(auto_requirement_candidates)
+
     if not args.no_auto_requirements and not requirements:
-        for candidate in default_requirement_candidates:
+        for candidate in auto_requirement_candidates:
             candidate_path = Path(candidate)
             if not candidate_path.is_absolute():
-                candidate_path = project_root / candidate
+                candidate_path = project_root / candidate_path
             if candidate_path.exists():
-                logging.info(
+                LOGGER.info(
                     "Auto-including requirements file at %s",
                     candidate_path,
                 )
                 requirements.append(candidate_path)
-    requirements = list(dict.fromkeys(requirements))
-    package_args = list(args.packages or [])
-    packages = list(dict.fromkeys(package_args))
+
+    requirements = _dedupe_preserve_order(requirements)
+    package_args = [str(item) for item in (args.packages or [])]
+    packages = _dedupe_preserve_order(package_args)
 
     manager = EnvManager(
         tool=tool,
@@ -514,7 +552,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             tox_path = project_root / tox_path
         update_tox_ini(project_root, versions, tox_path=tox_path)
 
-    logging.info("Provisioned %d environment(s)", len(created))
+    LOGGER.info("Provisioned %d environment(s)", len(created))
     return 0
 
 
