@@ -569,9 +569,7 @@ def _parse_cli_arguments(argv: Sequence[str] | None) -> CLIArguments:
     default_requirements_seq = cast(
         "Sequence[str] | None", getattr(namespace, "default_requirements", None)
     )
-    packages_seq = cast(
-        "Sequence[str] | None", getattr(namespace, "packages", None)
-    )
+    packages_seq = cast("Sequence[str] | None", getattr(namespace, "packages", None))
 
     requirements = [str(item) for item in requirements_seq] if requirements_seq else []
     default_requirements = (
