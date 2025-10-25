@@ -13,7 +13,9 @@ from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TypeVar
+from typing import TypeVar, cast
+
+from x_make_common_x.x_subprocess_utils_x import CommandError, run_command
 
 LOGGER = logging.getLogger(__name__)
 
@@ -282,8 +284,8 @@ class EnvManager:
             LOGGER.info("[dry-run] Skipped execution")
             return
         try:
-            subprocess.run(command, check=True, env=dict(env) if env else None)  # noqa: S603
-        except subprocess.CalledProcessError as exc:
+            run_command(command, env=dict(env) if env else None)
+        except CommandError as exc:
             msg = f"Command failed ({reason}): {exc}"
             raise RuntimeError(msg) from exc
 
@@ -362,9 +364,10 @@ def update_tox_ini(
     *,
     tox_path: Path,
 ) -> None:
+    resolved_tox_path = tox_path if tox_path.is_absolute() else project_root / tox_path
     config = configparser.ConfigParser()
-    if tox_path.exists():
-        config.read(tox_path, encoding="utf-8")
+    if resolved_tox_path.exists():
+        config.read(resolved_tox_path, encoding="utf-8")
     if "tox" not in config:
         config["tox"] = {}
     env_names = ", ".join(version.tox_env for version in versions)
@@ -376,10 +379,10 @@ def update_tox_ini(
         config[section].setdefault(
             "basepython", f"python{version.major}.{version.minor}"
         )
-    tox_path.parent.mkdir(parents=True, exist_ok=True)
-    with tox_path.open("w", encoding="utf-8") as handle:
+    resolved_tox_path.parent.mkdir(parents=True, exist_ok=True)
+    with resolved_tox_path.open("w", encoding="utf-8") as handle:
         config.write(handle)
-    LOGGER.info("Updated %s with envlist=%s", tox_path, env_names)
+    LOGGER.info("Updated %s with envlist=%s", resolved_tox_path, env_names)
 
 
 def parse_versions(items: Iterable[str]) -> list[VersionRequest]:
@@ -395,6 +398,60 @@ def parse_versions(items: Iterable[str]) -> list[VersionRequest]:
         msg = "At least one Python version must be provided"
         raise ValueError(msg)
     return parsed
+
+
+def _configure_logging(*, verbose: bool) -> None:
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(message)s",
+    )
+
+
+def _resolve_roots(project_root_arg: str, env_root_arg: str) -> tuple[Path, Path]:
+    project_root = Path(project_root_arg).resolve()
+    env_root = Path(env_root_arg)
+    if not env_root.is_absolute():
+        env_root = project_root / env_root
+    env_root.mkdir(parents=True, exist_ok=True)
+    return project_root, env_root
+
+
+def _normalize_requirement_path(project_root: Path, raw: str) -> Path:
+    candidate_path = Path(raw)
+    if not candidate_path.is_absolute():
+        candidate_path = project_root / candidate_path
+    return candidate_path
+
+
+def _collect_requirements(
+    *,
+    project_root: Path,
+    explicit: Sequence[str],
+    default_candidates: Sequence[str],
+    include_auto: bool,
+) -> list[Path]:
+    requirements = [
+        _normalize_requirement_path(project_root, item) for item in explicit if item
+    ]
+    requirements = _dedupe_preserve_order(requirements)
+    if include_auto and not requirements:
+        candidates = list(DEFAULT_AUTO_REQUIREMENT_FILES)
+        if default_candidates:
+            candidates.extend(default_candidates)
+        for candidate in _dedupe_preserve_order(candidates):
+            candidate_path = _normalize_requirement_path(project_root, candidate)
+            if candidate_path.exists():
+                LOGGER.info(
+                    "Auto-including requirements file at %s",
+                    candidate_path,
+                )
+                requirements.append(candidate_path)
+    return _dedupe_preserve_order(requirements)
+
+
+def _collect_packages(packages: Sequence[str]) -> list[str]:
+    filtered = [pkg for pkg in packages if pkg]
+    return _dedupe_preserve_order(filtered)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -482,14 +539,71 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
+@dataclass(frozen=True)
+class CLIArguments:
+    versions: list[str]
+    tool: str
+    project_root: str
+    env_root: str
+    requirements: list[str]
+    default_requirements: list[str]
+    packages: list[str]
+    bootstrap_uv: bool
+    dry_run: bool
+    no_auto_requirements: bool
+    skip_pip_upgrade: bool
+    verbose: bool
+    write_python_version: bool
+    update_tox: bool
+    tox_path: str
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(message)s",
+
+def _parse_cli_arguments(argv: Sequence[str] | None) -> CLIArguments:
+    parser = build_parser()
+    namespace = parser.parse_args(argv)
+
+    versions = [str(item) for item in cast("Sequence[str]", namespace.versions)]
+    requirements_seq = cast(
+        "Sequence[str] | None", getattr(namespace, "requirements", None)
     )
+    default_requirements_seq = cast(
+        "Sequence[str] | None", getattr(namespace, "default_requirements", None)
+    )
+    packages_seq = cast(
+        "Sequence[str] | None", getattr(namespace, "packages", None)
+    )
+
+    requirements = [str(item) for item in requirements_seq] if requirements_seq else []
+    default_requirements = (
+        [str(item) for item in default_requirements_seq]
+        if default_requirements_seq
+        else []
+    )
+    packages = [str(item) for item in packages_seq] if packages_seq else []
+
+    return CLIArguments(
+        versions=versions,
+        tool=str(namespace.tool),
+        project_root=str(namespace.project_root),
+        env_root=str(namespace.env_root),
+        requirements=requirements,
+        default_requirements=default_requirements,
+        packages=packages,
+        bootstrap_uv=bool(namespace.bootstrap_uv),
+        dry_run=bool(namespace.dry_run),
+        no_auto_requirements=bool(namespace.no_auto_requirements),
+        skip_pip_upgrade=bool(namespace.skip_pip_upgrade),
+        verbose=bool(namespace.verbose),
+        write_python_version=bool(namespace.write_python_version),
+        update_tox=bool(namespace.update_tox),
+        tox_path=str(namespace.tox_path),
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parse_cli_arguments(argv)
+
+    _configure_logging(verbose=args.verbose)
 
     versions = parse_versions(args.versions)
     tool = detect_tool(
@@ -497,39 +611,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         bootstrap_uv=args.bootstrap_uv,
         dry_run=args.dry_run,
     )
-    project_root = Path(args.project_root).resolve()
-    env_root = Path(args.env_root)
-    if not env_root.is_absolute():
-        env_root = project_root / env_root
-    env_root.mkdir(parents=True, exist_ok=True)
-    requirement_args = [str(item) for item in (args.requirements or [])]
-    requirements: list[Path] = []
-    for raw in requirement_args:
-        candidate_path = Path(raw)
-        if not candidate_path.is_absolute():
-            candidate_path = project_root / candidate_path
-        requirements.append(candidate_path)
 
-    auto_requirement_candidates = list(DEFAULT_AUTO_REQUIREMENT_FILES)
-    if args.default_requirements:
-        auto_requirement_candidates.extend(str(item) for item in args.default_requirements)
-    auto_requirement_candidates = _dedupe_preserve_order(auto_requirement_candidates)
-
-    if not args.no_auto_requirements and not requirements:
-        for candidate in auto_requirement_candidates:
-            candidate_path = Path(candidate)
-            if not candidate_path.is_absolute():
-                candidate_path = project_root / candidate_path
-            if candidate_path.exists():
-                LOGGER.info(
-                    "Auto-including requirements file at %s",
-                    candidate_path,
-                )
-                requirements.append(candidate_path)
-
-    requirements = _dedupe_preserve_order(requirements)
-    package_args = [str(item) for item in (args.packages or [])]
-    packages = _dedupe_preserve_order(package_args)
+    project_root, env_root = _resolve_roots(args.project_root, args.env_root)
+    requirements = _collect_requirements(
+        project_root=project_root,
+        explicit=args.requirements,
+        default_candidates=args.default_requirements,
+        include_auto=not args.no_auto_requirements,
+    )
+    packages = _collect_packages(args.packages)
 
     manager = EnvManager(
         tool=tool,
@@ -547,10 +637,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.write_python_version:
         write_python_version(project_root, versions[0])
     if args.update_tox:
-        tox_path = Path(args.tox_path)
-        if not tox_path.is_absolute():
-            tox_path = project_root / tox_path
-        update_tox_ini(project_root, versions, tox_path=tox_path)
+        update_tox_ini(project_root, versions, tox_path=Path(args.tox_path))
 
     LOGGER.info("Provisioned %d environment(s)", len(created))
     return 0
