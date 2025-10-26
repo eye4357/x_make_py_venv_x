@@ -11,9 +11,9 @@ import subprocess
 import sys
 from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
-from typing import TypeVar, cast
+from typing import TypedDict, TypeVar, cast
 
 from x_make_common_x.x_subprocess_utils_x import CommandError, run_command
 
@@ -44,7 +44,7 @@ def _dedupe_preserve_order(items: Iterable[HashableT]) -> list[HashableT]:
     return result
 
 
-class Tool(Enum):
+class Tool(StrEnum):
     """Supported interpreter orchestration tools."""
 
     AUTO = "auto"
@@ -558,18 +558,34 @@ class CLIArguments:
     tox_path: str
 
 
+class _ParsedNamespace(TypedDict):
+    versions: list[str]
+    tool: str
+    project_root: str
+    env_root: str
+    requirements: list[str] | None
+    default_requirements: list[str] | None
+    packages: list[str] | None
+    bootstrap_uv: bool
+    dry_run: bool
+    no_auto_requirements: bool
+    skip_pip_upgrade: bool
+    verbose: bool
+    write_python_version: bool
+    update_tox: bool
+    tox_path: str
+
+
 def _parse_cli_arguments(argv: Sequence[str] | None) -> CLIArguments:
     parser = build_parser()
     namespace = parser.parse_args(argv)
 
-    versions = [str(item) for item in cast("Sequence[str]", namespace.versions)]
-    requirements_seq = cast(
-        "Sequence[str] | None", getattr(namespace, "requirements", None)
-    )
-    default_requirements_seq = cast(
-        "Sequence[str] | None", getattr(namespace, "default_requirements", None)
-    )
-    packages_seq = cast("Sequence[str] | None", getattr(namespace, "packages", None))
+    raw = cast("_ParsedNamespace", vars(namespace))
+
+    versions = [str(item) for item in raw["versions"]]
+    requirements_seq = raw["requirements"]
+    default_requirements_seq = raw["default_requirements"]
+    packages_seq = raw["packages"]
 
     requirements = [str(item) for item in requirements_seq] if requirements_seq else []
     default_requirements = (
@@ -581,20 +597,20 @@ def _parse_cli_arguments(argv: Sequence[str] | None) -> CLIArguments:
 
     return CLIArguments(
         versions=versions,
-        tool=str(namespace.tool),
-        project_root=str(namespace.project_root),
-        env_root=str(namespace.env_root),
+        tool=str(raw["tool"]),
+        project_root=str(raw["project_root"]),
+        env_root=str(raw["env_root"]),
         requirements=requirements,
         default_requirements=default_requirements,
         packages=packages,
-        bootstrap_uv=bool(namespace.bootstrap_uv),
-        dry_run=bool(namespace.dry_run),
-        no_auto_requirements=bool(namespace.no_auto_requirements),
-        skip_pip_upgrade=bool(namespace.skip_pip_upgrade),
-        verbose=bool(namespace.verbose),
-        write_python_version=bool(namespace.write_python_version),
-        update_tox=bool(namespace.update_tox),
-        tox_path=str(namespace.tox_path),
+        bootstrap_uv=bool(raw["bootstrap_uv"]),
+        dry_run=bool(raw["dry_run"]),
+        no_auto_requirements=bool(raw["no_auto_requirements"]),
+        skip_pip_upgrade=bool(raw["skip_pip_upgrade"]),
+        verbose=bool(raw["verbose"]),
+        write_python_version=bool(raw["write_python_version"]),
+        update_tox=bool(raw["update_tox"]),
+        tox_path=str(raw["tox_path"]),
     )
 
 
