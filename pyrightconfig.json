@@ -1,0 +1,10 @@
+{
+  "include": ["**/*.py"],
+  "exclude": [
+    ".venv",
+    "artifacts",
+    "__pycache__",
+    "**/__pycache__"
+  ],
+  "extraPaths": [".."]
+}
